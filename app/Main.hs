@@ -83,13 +83,13 @@ writeSection =
 readAll :: [String] -> EpubArrow b XmlTree
 readAll fls= constL fls >>> arr((++) "file://") >>> readFromDocument [withValidate no, withParseHTML yes] 
 
-collect :: EpubArrow [XmlTree] XmlTree
-collect = proc xs -> do
-   arr(\chlds -> NTree (XTag (mkName "html") []) chlds) -< xs
-
-final :: EpubArrow [XmlTree] XmlTree
-final = proc xs -> do
-   arr(\chlds -> NTree (XTag (mkName "merge") []) chlds) -< xs
+--collect :: EpubArrow [XmlTree] XmlTree
+--collect = proc xs -> do
+--   arr(\chlds -> NTree (XTag (mkName "html") []) chlds) -< xs
+--
+--final :: EpubArrow [XmlTree] XmlTree
+--final = proc xs -> do
+--   arr(\chlds -> NTree (XTag (mkName "merge") []) chlds) -< xs
 
 createSection :: [XmlTree] -> XmlTree
 createSection cs = XN.mkRoot [] [
@@ -171,8 +171,8 @@ nextId = proc x -> do
    setUserState -< e {idcnt = newid + 1}
    returnA -< newid
 
-nextSection :: Epubmeta -> Epubmeta
-nextSection e = e { seccnt= (seccnt e) + 1 }
+--nextSection :: Epubmeta -> Epubmeta
+--nextSection e = e { seccnt= (seccnt e) + 1 }
 
 addMark :: EpubArrow (String,Int) (String,Int)
 addMark = arr id &&& getUserState >>> arr(\(s,e)-> (s, e { marks = s : (marks e) })) >>> second setUserState >>> arr fst
