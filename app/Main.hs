@@ -7,6 +7,7 @@ import Control.Monad.State hiding (when)
 import Text.XML.HXT.Core
 import Text.XML.HXT.Arrow.XmlState.RunIOStateArrow
 import Text.XML.HXT.Arrow.XmlState.TypeDefs
+import Text.XML.HXT.DOM.QualifiedName
 import Data.Tree.NTree.TypeDefs
 import Data.AssocList
 import Text.Printf
