@@ -1,6 +1,11 @@
 {-#LANGUAGE Arrows, PackageImports, NoMonomorphismRestriction, FlexibleInstances, MultiParamTypeClasses, RelaxedPolyRec #-}
 module Main where
-
+--TODO Pagebreaks einsammeln und die Tags im Text entsprechend bearbeiten
+--TODO erste Datei via Top-Arrow einlesen, die Folgenden dateien mit RunX in einer IO Monade lesen und diese via ArrIO
+--     innerhalb der Arrow-Kette ausfuehren!
+--TODO h1 zu h2, Ueberschrift aus erstem Dokument fuer die Section erstellen
+--TODO im Nachgang Tidy aufrufen?
+--TODO Namespaces im Header deklarieren
 import Control.Arrow.ArrowIO
 import Control.Monad hiding (when)
 import Control.Monad.State hiding (when)
@@ -8,6 +13,7 @@ import Text.XML.HXT.Core
 import Text.XML.HXT.Arrow.XmlState.RunIOStateArrow
 import Text.XML.HXT.Arrow.XmlState.TypeDefs
 import Text.XML.HXT.DOM.QualifiedName
+import Text.XML.HXT.DOM.XmlKeywords (a_source) --for Attribute a_source  - sourcefile read from
 import Data.Tree.NTree.TypeDefs
 import Data.AssocList
 import Text.Printf
@@ -51,7 +57,7 @@ main :: IO ()
 main = do
    fls <- filesFor "kapitel3050" 
    mapM putStrLn fls 
-   (_,e) <- runEpub (eBkvPar fls) epubInit
+   (_,e) <- runStateT (eBkvPar fls) epubInit
    return ()
 
 filesFor :: String -> IO [FilePath]
@@ -60,16 +66,16 @@ filesFor prefix = return $ takeWhile pureFileExist fls
 
 eBkvPar :: [FilePath] -> Epub ()
 eBkvPar fs = do
-   n <- runEpubX (readAll fs >>> transform)
-   runEpubX outputFootnotes
-   runEpubX (constA (createSection n) >>> writeSection )
+   n <- runEpubA (readAll fs >>> scExtract)
+   runEpubA outputFootnotes
+   runEpubA (constA (createSection n) >>> writeSection )
    return () 
 
-runEpub :: Epub a -> Epubmeta -> IO (a, Epubmeta)
-runEpub = runStateT
+--runEpub :: Epub a -> Epubmeta -> IO (a, Epubmeta)
+--runEpub = runStateT
 
-runEpubX :: IOStateArrow Epubmeta XmlTree c -> Epub [c]
-runEpubX f = do
+runEpubA :: IOStateArrow Epubmeta XmlTree c -> Epub [c]
+runEpubA f = do
    e <- get
    (x, res) <- lift $ runIOSLA (root [] [] >>> f) (initialState e) undefined
    put $ xioUserState x
@@ -82,51 +88,55 @@ writeSection =
          inc e = e {seccnt = 1 + (seccnt e)}
 
 readAll :: [String] -> EpubArrow b XmlTree
-readAll fls= constL fls >>> arr((++) "file://") >>> readFromDocument [withValidate no, withParseHTML yes] 
+readAll fls= constL fls >>> arr((++) "file://") >>> readFromDocument [withValidate no, withParseHTML yes] >>> proc x -> do
+   v <- getAttrValue a_source -< x
+   arrIO(\s -> putStrLn $ "Read file " ++ s) -< v
+   returnA -< x
 
---collect :: EpubArrow [XmlTree] XmlTree
---collect = proc xs -> do
---   arr(\chlds -> NTree (XTag (mkName "html") []) chlds) -< xs
---
---final :: EpubArrow [XmlTree] XmlTree
---final = proc xs -> do
---   arr(\chlds -> NTree (XTag (mkName "merge") []) chlds) -< xs
+col :: [XmlTree] -> [XmlTree]
+col = id
+
+bld :: [[XmlTree]] -> XmlTree
+bld xs = NTree (XTag (mkName "bosh") []) (join xs) 
 
 createSection :: [XmlTree] -> XmlTree
 createSection cs = XN.mkRoot [] [
    XN.mkElement (mkName "html") [] [
       XN.mkElement (mkName "body") [] cs ]]
 
-transform :: EpubArrow XmlTree XmlTree
-transform = multi (isContentTd `guards` filterBkvNode) >>> getChildren
+scExtract :: EpubArrow XmlTree XmlTree
+scExtract = deep (isContent `guards` prCollect) >>> getChildren
+   where isContent = hasName "td" /> hasName "h1" 
 
-isContentTd :: (ArrowXml a) => a XmlTree XmlTree
-isContentTd = isElem >>> hasName "td" >>> getChildren >>> isElem >>> hasName "h1"
+prCollect :: EpubArrow XmlTree XmlTree
+prCollect = processChildren (porh1 >>> pcfn >>> fncmpl >>> chgh2)
 
-filterBkvNode :: EpubArrow XmlTree XmlTree
-filterBkvNode = processChildren (pcft `when` (hasName "p")) >>>
-   processChildren (filterA (hasName "p" <+> hasName "h1")) >>>
-   processChildren (ifA isFootnotePar completeFootnote this ) 
-   where pcft = processChildren (processFootnotes `when` (hasName "a" >>> hasAttrValue "class" ((==) "a2textf"))) 
+   where porh1  = filterA (hasName "p" <+> hasName "h1")
+         
+         pcfn   = processChildren (fnCollect `when` (hasName "a" >>> hasAttrValue "class" ((==) "a2textf"))) `when` hasName "p"
 
-processFootnotes :: EpubArrow XmlTree XmlTree
-processFootnotes = getAttrValue "href" &&& arr id >>> 
+         fncmpl = ifA isFnPar fnComplete this 
+
+         chgh2  = setElemName (mkName "h2") `when` hasName "h1"
+
+         isFnPar= hasName "p" /> hasName "a" >>> hasAttrValue "class" ((==) "a2text") 
+
+fnCollect :: EpubArrow XmlTree XmlTree
+fnCollect = getAttrValue "href" &&& arr id >>> 
    first (arrL idhref &&& nextId) >>>  
    first addMark  >>> 
-   first (arr $ createMark . snd) >>> app
+   first (arr $ fnCreate . snd) >>> app
    
-createMark :: Int -> EpubArrow XmlTree XmlTree
-createMark i = replaceChildren (mkelem "sup" [] [mkelem "i" [] [constA (show i) >>> mkText]]) >>> 
-   processAttrl ( changeAttrValue (\_-> createNoteRef i) `when` hasName "href") >>> removeAttr "class"
+fnCreate :: Int -> EpubArrow XmlTree XmlTree
+fnCreate i = replaceChildren (mkelem "sup" [] [mkelem "i" [] [constA (show i) >>> mkText]]) >>> fnLinkAttrs i
 
-createNoteRef :: Int -> String
-createNoteRef = ((++) "Notes.html#") . noteId
+fnLinkAttrs :: Int -> EpubArrow XmlTree XmlTree
+fnLinkAttrs i = fnAttrs >>> removeAttr "class" >>> addAttr "epub:type" "noteref"
+   where fnAttrs = processAttrl $ changeAttrValue (noteref) `when` hasName "href"
+         noteref = const $ "Notes.html#" ++ (printf "ft%04d" i)
 
-isFootnotePar :: EpubArrow XmlTree XmlTree
-isFootnotePar = hasName "p" >>> getChildren >>> hasName "a" >>> hasAttrValue "class" ((==) "a2text")
-
-completeFootnote :: EpubArrow XmlTree XmlTree
-completeFootnote = deep $ getChildren >>> choiceA [isAref :-> fa, isSpan :-> fspan]
+fnComplete :: EpubArrow XmlTree XmlTree
+fnComplete = deep $ getChildren >>> choiceA [isAref :-> fa, isSpan :-> fspan]
    where 
       isAref = hasName "a"
       isSpan = hasName "span"
@@ -154,10 +164,6 @@ dumpnotes e = do
    forM (reverse $ footnotes e) $ putStrLn . show
    return ()
       
-
-noteId :: Int -> String
-noteId = printf "ft%04d"
-
 rnoteId :: Int -> String
 rnoteId= printf "r%04d"
 
@@ -171,9 +177,6 @@ nextId = proc x -> do
    let newid= idcnt e
    setUserState -< e {idcnt = newid + 1}
    returnA -< newid
-
---nextSection :: Epubmeta -> Epubmeta
---nextSection e = e { seccnt= (seccnt e) + 1 }
 
 addMark :: EpubArrow (String,Int) (String,Int)
 addMark = arr id &&& getUserState >>> arr(\(s,e)-> (s, e { marks = s : (marks e) })) >>> second setUserState >>> arr fst
