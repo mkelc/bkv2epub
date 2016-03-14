@@ -1,11 +1,8 @@
-{-#LANGUAGE Arrows, PackageImports, NoMonomorphismRestriction, FlexibleInstances, MultiParamTypeClasses, RelaxedPolyRec #-}
+{-#LANGUAGE Arrows, PackageImports, NoMonomorphismRestriction, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, RelaxedPolyRec #-}
 module Main where
---TODO Pagebreaks einsammeln und die Tags im Text entsprechend bearbeiten
 --TODO erste Datei via Top-Arrow einlesen, die Folgenden dateien mit RunX in einer IO Monade lesen und diese via ArrIO
 --     innerhalb der Arrow-Kette ausfuehren!
---TODO h1 zu h2, Ueberschrift aus erstem Dokument fuer die Section erstellen
 --TODO im Nachgang Tidy aufrufen?
---TODO Namespaces im Header deklarieren
 import Control.Arrow.ArrowIO
 import Control.Monad hiding (when)
 import Control.Monad.State hiding (when)
@@ -14,6 +11,7 @@ import Text.XML.HXT.Arrow.XmlState.RunIOStateArrow
 import Text.XML.HXT.Arrow.XmlState.TypeDefs
 import Text.XML.HXT.DOM.QualifiedName
 import Text.XML.HXT.DOM.XmlKeywords (a_source) --for Attribute a_source  - sourcefile read from
+import Text.ParserCombinators.Parsec
 import Data.Tree.NTree.TypeDefs
 import Data.AssocList
 import Text.Printf
@@ -33,7 +31,7 @@ data Pagebreak = Pagebreak {
    pgid       :: String,
    pgn        :: String,
    pgsection  :: Int
-}
+} deriving (Show)
 
 data Epubmeta = Epubmeta {
    idcnt     :: Int,
@@ -49,6 +47,12 @@ type Epub = StateT Epubmeta IO
 bkvSource :: FilePath
 bkvSource = "D:/private/projects/cassian/"
 
+inputOpts :: SysConfigList
+inputOpts = [withValidate no, withParseHTML yes]
+
+outputOpts :: SysConfigList
+outputOpts = [withIndent yes, withOutputXHTML, withAddDefaultDTD yes] 
+
 epubInit :: Epubmeta
 epubInit =  Epubmeta 0 1  [] [] []
 
@@ -57,22 +61,19 @@ main :: IO ()
 main = do
    fls <- filesFor "kapitel3050" 
    mapM putStrLn fls 
-   (_,e) <- runStateT (eBkvPar fls) epubInit
+   (_,e) <- runStateT (processSection fls) epubInit
    return ()
 
 filesFor :: String -> IO [FilePath]
 filesFor prefix = return $ takeWhile pureFileExist fls
    where fls = map ((++) bkvSource) $ series prefix
 
-eBkvPar :: [FilePath] -> Epub ()
-eBkvPar fs = do
+processSection :: [FilePath] -> Epub ()
+processSection fs = do
    n <- runEpubA (readAll fs >>> scExtract)
    runEpubA outputFootnotes
-   runEpubA (constA (createSection n) >>> writeSection )
+   runEpubA (constA (createSection n) >>> removeDocWhiteSpace >>> canonicalizeAllNodes >>> writeSection )
    return () 
-
---runEpub :: Epub a -> Epubmeta -> IO (a, Epubmeta)
---runEpub = runStateT
 
 runEpubA :: IOStateArrow Epubmeta XmlTree c -> Epub [c]
 runEpubA f = do
@@ -84,24 +85,18 @@ runEpubA f = do
 writeSection :: EpubArrow XmlTree XmlTree
 writeSection = 
    getUserState &&& this >>> first (arr  inc >>> setUserState >>> arr wrt) >>> app
-   where wrt e = writeDocument [withIndent no, withOutputXHTML, withAddDefaultDTD yes] (printf "Section-%04d.xhtml" ((seccnt e)-1))
+   where wrt e = writeDocument outputOpts (printf "Section-%04d.xhtml" ((seccnt e)-1))
          inc e = e {seccnt = 1 + (seccnt e)}
 
 readAll :: [String] -> EpubArrow b XmlTree
-readAll fls= constL fls >>> arr((++) "file://") >>> readFromDocument [withValidate no, withParseHTML yes] >>> proc x -> do
+readAll fls= constL fls >>> arr((++) "file://") >>> readFromDocument inputOpts >>> proc x -> do
    v <- getAttrValue a_source -< x
    arrIO(\s -> putStrLn $ "Read file " ++ s) -< v
    returnA -< x
 
-col :: [XmlTree] -> [XmlTree]
-col = id
-
-bld :: [[XmlTree]] -> XmlTree
-bld xs = NTree (XTag (mkName "bosh") []) (join xs) 
-
 createSection :: [XmlTree] -> XmlTree
 createSection cs = XN.mkRoot [] [
-   XN.mkElement (mkName "html") [] [
+   XN.mkElement (mkName "html") [XN.mkAttr (mkName "xmlns:epub") [XN.mkText "http://www.idpf.org/2007/ops"]] [
       XN.mkElement (mkName "body") [] cs ]]
 
 scExtract :: EpubArrow XmlTree XmlTree
@@ -109,7 +104,7 @@ scExtract = deep (isContent `guards` prCollect) >>> getChildren
    where isContent = hasName "td" /> hasName "h1" 
 
 prCollect :: EpubArrow XmlTree XmlTree
-prCollect = processChildren (porh1 >>> pcfn >>> fncmpl >>> chgh2)
+prCollect = processChildren (porh1 >>> pcfn >>> pgCollect >>> fncmpl >>> chgh2)
 
    where porh1  = filterA (hasName "p" <+> hasName "h1")
          
@@ -120,6 +115,25 @@ prCollect = processChildren (porh1 >>> pcfn >>> fncmpl >>> chgh2)
          chgh2  = setElemName (mkName "h2") `when` hasName "h1"
 
          isFnPar= hasName "p" /> hasName "a" >>> hasAttrValue "class" ((==) "a2text") 
+
+pgCollect :: EpubArrow XmlTree XmlTree
+pgCollect = processChildren( pgc `when`(hasName "a" >>> hasAttrValue "class" ((==) "a8text")) )
+   where pgc = (\p -> mkelem "span" [sattr "id" (pgId p), sattr "epub:type" "pagebreak", sattr "title" p] [] ) $< pageNum
+         pageNum = getChildren >>> isText >>> getText >>> arr(pgParse) >>> pgStore
+
+pgParse :: String -> String
+pgParse str = case (parse pgSpec "" str) of
+      Left _ -> "" 
+      Right s -> s
+   where pgSpec = do
+          spaces >> char '[' >> spaces >> string "S." >> spaces
+          pgn <- (many digit)
+          spaces >> char ']'
+          return pgn
+
+pgStore :: EpubArrow String String
+pgStore = getUserState &&& this >>> arr(\(e,p)-> (pgIns e p,p)) >>> first setUserState >>> arr snd
+   where pgIns e p = e { pagebreaks = (Pagebreak (pgId p) p (seccnt e)):(pagebreaks e) }
 
 fnCollect :: EpubArrow XmlTree XmlTree
 fnCollect = getAttrValue "href" &&& arr id >>> 
@@ -133,7 +147,7 @@ fnCreate i = replaceChildren (mkelem "sup" [] [mkelem "i" [] [constA (show i) >>
 fnLinkAttrs :: Int -> EpubArrow XmlTree XmlTree
 fnLinkAttrs i = fnAttrs >>> removeAttr "class" >>> addAttr "epub:type" "noteref"
    where fnAttrs = processAttrl $ changeAttrValue (noteref) `when` hasName "href"
-         noteref = const $ "Notes.html#" ++ (printf "ft%04d" i)
+         noteref = const $ "Notes.html#" ++ (noteId i)
 
 fnComplete :: EpubArrow XmlTree XmlTree
 fnComplete = deep $ getChildren >>> choiceA [isAref :-> fa, isSpan :-> fspan]
@@ -162,8 +176,15 @@ outputFootnotes = proc x -> do
 dumpnotes :: Epubmeta -> IO ()
 dumpnotes e = do
    forM (reverse $ footnotes e) $ putStrLn . show
+   forM (reverse $ pagebreaks e) $ putStrLn . show
    return ()
-      
+
+pgId :: String -> String
+pgId = (++) "pg"
+
+noteId :: Int -> String
+noteId = printf "ft%04d" 
+
 rnoteId :: Int -> String
 rnoteId= printf "r%04d"
 

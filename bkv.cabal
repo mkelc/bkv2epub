@@ -28,6 +28,7 @@ executable bkv-exe
                      , bkv
                      , hxt
                      , mtl
+                     , parsec
   default-language:    Haskell2010
 
 test-suite bkv-test
