@@ -29,6 +29,8 @@ executable bkv-exe
                      , hxt
                      , mtl
                      , parsec
+                     , directory
+                     , filepath
   default-language:    Haskell2010
 
 test-suite bkv-test

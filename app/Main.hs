@@ -11,21 +11,22 @@ import Text.XML.HXT.Arrow.XmlState.RunIOStateArrow
 import Text.XML.HXT.Arrow.XmlState.TypeDefs
 import Text.XML.HXT.DOM.QualifiedName
 import Text.XML.HXT.DOM.XmlKeywords (a_source) --for Attribute a_source  - sourcefile read from
+import qualified Text.XML.HXT.DOM.XmlNode as XN
 import Text.ParserCombinators.Parsec
 import Data.Tree.NTree.TypeDefs
 import Data.AssocList
 import Text.Printf
+import System.Environment
+import System.FilePath
+import System.Directory
 import Lib
-
-import qualified Text.XML.HXT.DOM.XmlNode as XN
 
 data Footnote = Footnote {
    ftid      :: Int,
    ftsection :: Int,
    ftcontent :: [XmlTree],
    ftnum     :: String
-   }
-   deriving (Show)
+} deriving (Show)
 
 data Pagebreak = Pagebreak {
    pgid       :: String,
@@ -33,16 +34,24 @@ data Pagebreak = Pagebreak {
    pgsection  :: Int
 } deriving (Show)
 
-data Epubmeta = Epubmeta {
-   idcnt     :: Int,
-   seccnt    :: Int,
-   marks     :: [(String,Int)],
-   footnotes :: [Footnote],
-   pagebreaks:: [Pagebreak]
-}
+data EpubMeta = EpubMeta {
+   idcnt       :: Int,
+   seccnt      :: Int,
+   marks       :: [(String,Int)],
+   footnotes   :: [Footnote],
+   pagebreaks  :: [Pagebreak],
+   sourceQueue :: [String],
+   sourcefiles :: SourceFiles
+} deriving (Show)
 
-type EpubArrow b c = IOStateArrow Epubmeta b c
-type Epub = StateT Epubmeta IO
+data SourceFiles = SourceFiles {
+   sourcePath :: FilePath,
+   targetPath :: FilePath,
+   filenames  :: [String]
+} deriving (Show,Read)
+
+type EpubArrow b c = IOStateArrow EpubMeta b c
+type Epub = StateT EpubMeta IO
 
 bkvSource :: FilePath
 bkvSource = "D:/private/projects/cassian/"
@@ -53,51 +62,94 @@ inputOpts = [withValidate no, withParseHTML yes]
 outputOpts :: SysConfigList
 outputOpts = [withIndent yes, withOutputXHTML, withAddDefaultDTD yes] 
 
-epubInit :: Epubmeta
-epubInit =  Epubmeta 0 1  [] [] []
-
-
 main :: IO ()
-main = do
-   fls <- filesFor "kapitel3050" 
-   mapM putStrLn fls 
-   (_,e) <- runStateT (processSection fls) epubInit
+main = getArgs >>= bkv
+
+bkv :: [String] -> IO ()
+bkv []    = putStrLn "Usage: bkv.exe <epub-source-definition-file>.def"
+bkv (s:_) = do
+   e <- fmap epubInit $ readFile s >>= readIO
+   --putStrLn $ show (sourcefiles e)
+   (scs,_) <- runStateT createEpub e
    return ()
+   --fls <- filesFor "kapitel3050" 
+   --mapM putStrLn fls 
+   --(_,e) <- runStateT (processSection fls) epubInit
+   --return ()
 
-filesFor :: String -> IO [FilePath]
-filesFor prefix = return $ takeWhile pureFileExist fls
-   where fls = map ((++) bkvSource) $ series prefix
+epubInit :: SourceFiles -> EpubMeta
+epubInit srf = EpubMeta 1 1 [] [] [] (filenames srf) srf
 
-processSection :: [FilePath] -> Epub ()
-processSection fs = do
-   n <- runEpubA (readAll fs >>> scExtract)
-   runEpubA outputFootnotes
-   runEpubA (constA (createSection n) >>> removeDocWhiteSpace >>> canonicalizeAllNodes >>> writeSection )
-   return () 
+--filesFor :: String -> IO [FilePath]
+--filesFor prefix = return $ takeWhile pureFileExist fls
+--   where fls = map ((++) bkvSource) $ series prefix
 
-runEpubA :: IOStateArrow Epubmeta XmlTree c -> Epub [c]
+createEpub :: Epub ()
+createEpub = sections >>= mapM_ processSection' >> runEpubA outputFootnotes >> return ()
+
+sections :: Epub [[FilePath]]
+sections = do
+   sf <- fmap sourcefiles $ get
+   let sp= sourcePath sf
+       fl= map (\fn -> (fn, sp ++ fn)) $ filenames sf
+   forM fl (\(fn,fp) -> filesFor' fp >>= return . ((:) fp) )
+
+filesFor' :: FilePath -> Epub [FilePath]
+filesFor' fp= lift $ loop [] (takeBaseName fp) (takeDirectory fp) [1..] 
+   where loop fps b d (n:ns)= do
+            let c= d </> (b ++ "-" ++ (show n) ++ ".html")
+            x <- doesFileExist c
+            if x then
+               loop fps b d ns >>= return . ((:) c)
+               --loop (fps ++ [c]) b d ns
+            else
+               return []
+      
+runEpubA :: IOStateArrow EpubMeta XmlTree c -> Epub [c]
 runEpubA f = do
    e <- get
    (x, res) <- lift $ runIOSLA (root [] [] >>> f) (initialState e) undefined
    put $ xioUserState x
    return res
 
-writeSection :: EpubArrow XmlTree XmlTree
-writeSection = 
-   getUserState &&& this >>> first (arr  inc >>> setUserState >>> arr wrt) >>> app
-   where wrt e = writeDocument outputOpts (printf "Section-%04d.xhtml" ((seccnt e)-1))
-         inc e = e {seccnt = 1 + (seccnt e)}
+processSection' :: [FilePath] -> Epub ()
+processSection' a@(f:_)= do
+   h <- runEpubA (readDocument inputOpts (toUri f) >>> hExtract)
+   n <- runEpubA (readAll a >>> scExtract)
+   runEpubA (constA (createSection (h++n)) >>> removeDocWhiteSpace >>> canonicalizeAllNodes >>> writeSection)
+   runEpubA fnOutput
+   return ()
+
+processSection :: [FilePath] -> Epub ()
+processSection fs = do
+   n <- runEpubA (readAll fs >>> scExtract)
+   runEpubA (constA (createSection n) >>> removeDocWhiteSpace >>> canonicalizeAllNodes >>> writeSection )
+   runEpubA fnOutput
+   return () 
 
 readAll :: [String] -> EpubArrow b XmlTree
-readAll fls= constL fls >>> arr((++) "file://") >>> readFromDocument inputOpts >>> proc x -> do
+readAll fls= constL fls >>> arr toUri >>> readFromDocument inputOpts >>> proc x -> do
    v <- getAttrValue a_source -< x
    arrIO(\s -> putStrLn $ "Read file " ++ s) -< v
    returnA -< x
+
+toUri :: FilePath -> String
+toUri = (++) "file://"
+
+writeSection :: EpubArrow XmlTree XmlTree
+writeSection = 
+   getUserState &&& this >>> first (arr  inc >>> setUserState >>> arr wrt) >>> app
+   where wrt e = writeDocument outputOpts (secFile ((seccnt e)-1))
+         inc e = e {seccnt = 1 + (seccnt e)}
 
 createSection :: [XmlTree] -> XmlTree
 createSection cs = XN.mkRoot [] [
    XN.mkElement (mkName "html") [XN.mkAttr (mkName "xmlns:epub") [XN.mkText "http://www.idpf.org/2007/ops"]] [
       XN.mkElement (mkName "body") [] cs ]]
+
+hExtract :: EpubArrow XmlTree XmlTree
+hExtract = deep (scTitle) >>> arr(\txt -> XN.mkElement (mkName "h1") [] [XN.mkText txt])
+   where scTitle = hasName "span" >>> hasAttrValue "class" ((==) "a2textg") >>> getChildren >>> isText >>> getText
 
 scExtract :: EpubArrow XmlTree XmlTree
 scExtract = deep (isContent `guards` prCollect) >>> getChildren
@@ -147,7 +199,7 @@ fnCreate i = replaceChildren (mkelem "sup" [] [mkelem "i" [] [constA (show i) >>
 fnLinkAttrs :: Int -> EpubArrow XmlTree XmlTree
 fnLinkAttrs i = fnAttrs >>> removeAttr "class" >>> addAttr "epub:type" "noteref"
    where fnAttrs = processAttrl $ changeAttrValue (noteref) `when` hasName "href"
-         noteref = const $ "Notes.html#" ++ (noteId i)
+         noteref = const $ "Notes.xhtml#" ++ (noteId i)
 
 fnComplete :: EpubArrow XmlTree XmlTree
 fnComplete = deep $ getChildren >>> choiceA [isAref :-> fa, isSpan :-> fspan]
@@ -167,13 +219,36 @@ fnComplete = deep $ getChildren >>> choiceA [isAref :-> fa, isSpan :-> fspan]
          setUserState -< e { footnotes = (ftn {ftcontent = c}):(tail $ footnotes e) }
          none -< x
 
+fnXml :: [XmlTree] -> [Footnote] -> [XmlTree]
+fnXml tr [] = tr
+fnXml tr (Footnote i s x _ : fs) = fnXml ( pnode : tr ) fs
+   where pnode  = elm "p" [atr "epub:type" "footnote", atr "id" (noteId i)] ([elm "a" [atr "href" ref] [isup (show i)]] ++ x)
+         elm n  = XN.mkElement (mkName n)
+         atr n v= XN.mkAttr (mkName n) [XN.mkText v]
+         ref    = (secFile s) ++ "#" ++ (rnoteId i)
+         isup  t= elm "i" [] [elm "sup" [] [XN.mkText t]]
+
+--fnXmlA :: (ArrowXml a) => [Footnote] -> a n XmlTree
+--fnXmlA (Footnote i s x _ : fs) = pnode <+> fnXmlA fs 
+--   where pnode = mkelem "p" [attr "epub:type" (txt "footnote"), attr "id" (txt . noteId $ i)] (ahref : map constA x)
+--         ahref = mkelem "a" [attr "href" (txt $ (secFile s) ++ "#" ++ (rnoteId i))] [ isup ]
+--         isup  = selem "i" [selem "sup" [txt (show i)]]
+--fnXmlA []      = this
+
+fnOutput :: EpubArrow b ()
+fnOutput = proc x -> do
+   e <- getUserState -< x
+   ns <- arr (fnXml []) -< (footnotes e)
+   writeDocument outputOpts "Notes.xhtml" -< createSection ns
+   returnA -< ()
+
 outputFootnotes :: EpubArrow b ()
 outputFootnotes = proc x -> do
    e <- getUserState -< x
    arrIO( \s -> dumpnotes s) -< e
    returnA -< ()
 
-dumpnotes :: Epubmeta -> IO ()
+dumpnotes :: EpubMeta -> IO ()
 dumpnotes e = do
    forM (reverse $ footnotes e) $ putStrLn . show
    forM (reverse $ pagebreaks e) $ putStrLn . show
@@ -187,6 +262,10 @@ noteId = printf "ft%04d"
 
 rnoteId :: Int -> String
 rnoteId= printf "r%04d"
+
+secFile :: Int -> String
+secFile = printf "Section-%04d.xhtml"
+
 
 idhref :: String -> [String]
 idhref ('#' : xs) = [xs]
