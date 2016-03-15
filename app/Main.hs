@@ -40,7 +40,6 @@ data EpubMeta = EpubMeta {
    marks       :: [(String,Int)],
    footnotes   :: [Footnote],
    pagebreaks  :: [Pagebreak],
-   sourceQueue :: [String],
    sourcefiles :: SourceFiles
 } deriving (Show)
 
@@ -67,25 +66,13 @@ main = getArgs >>= bkv
 
 bkv :: [String] -> IO ()
 bkv []    = putStrLn "Usage: bkv.exe <epub-source-definition-file>.def"
-bkv (s:_) = do
-   e <- fmap epubInit $ readFile s >>= readIO
-   --putStrLn $ show (sourcefiles e)
-   (scs,_) <- runStateT createEpub e
-   return ()
-   --fls <- filesFor "kapitel3050" 
-   --mapM putStrLn fls 
-   --(_,e) <- runStateT (processSection fls) epubInit
-   --return ()
+bkv (s:_) = readFile s >>= readIO >>= (return . epubInit) >>= runStateT createEpub >> return ()
 
 epubInit :: SourceFiles -> EpubMeta
-epubInit srf = EpubMeta 1 1 [] [] [] (filenames srf) srf
-
---filesFor :: String -> IO [FilePath]
---filesFor prefix = return $ takeWhile pureFileExist fls
---   where fls = map ((++) bkvSource) $ series prefix
+epubInit = EpubMeta 1 1 [] [] [] 
 
 createEpub :: Epub ()
-createEpub = sections >>= mapM_ processSection' >> runEpubA outputFootnotes >> return ()
+createEpub = sections >>= mapM_ processSection' >> return ()
 
 sections :: Epub [[FilePath]]
 sections = do
@@ -101,7 +88,6 @@ filesFor' fp= lift $ loop [] (takeBaseName fp) (takeDirectory fp) [1..]
             x <- doesFileExist c
             if x then
                loop fps b d ns >>= return . ((:) c)
-               --loop (fps ++ [c]) b d ns
             else
                return []
       
@@ -120,12 +106,12 @@ processSection' a@(f:_)= do
    runEpubA fnOutput
    return ()
 
-processSection :: [FilePath] -> Epub ()
-processSection fs = do
-   n <- runEpubA (readAll fs >>> scExtract)
-   runEpubA (constA (createSection n) >>> removeDocWhiteSpace >>> canonicalizeAllNodes >>> writeSection )
-   runEpubA fnOutput
-   return () 
+--processSection :: [FilePath] -> Epub ()
+--processSection fs = do
+--   n <- runEpubA (readAll fs >>> scExtract)
+--   runEpubA (constA (createSection n) >>> removeDocWhiteSpace >>> canonicalizeAllNodes >>> writeSection )
+--   runEpubA fnOutput
+--   return () 
 
 readAll :: [String] -> EpubArrow b XmlTree
 readAll fls= constL fls >>> arr toUri >>> readFromDocument inputOpts >>> proc x -> do
