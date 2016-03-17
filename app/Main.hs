@@ -37,6 +37,7 @@ data Pagebreak = Pagebreak {
 data EpubMeta = EpubMeta {
    idcnt       :: Int,
    seccnt      :: Int,
+   toccnt      :: Int,
    marks       :: [(String,Int)],
    footnotes   :: [Footnote],
    pagebreaks  :: [Pagebreak],
@@ -69,7 +70,7 @@ bkv []    = putStrLn "Usage: bkv.exe <epub-source-definition-file>.def"
 bkv (s:_) = readFile s >>= readIO >>= (return . epubInit) >>= runStateT createEpub >> return ()
 
 epubInit :: SourceFiles -> EpubMeta
-epubInit = EpubMeta 1 1 [] [] [] 
+epubInit = EpubMeta 1 1 0 [] [] [] 
 
 createEpub :: Epub ()
 createEpub = sections >>= mapM_ processSection' >> return ()
@@ -101,20 +102,24 @@ runEpubA f = do
 processSection' :: [FilePath] -> Epub ()
 processSection' a@(f:_)= do
    h <- runEpubA (readDocument inputOpts (toUri f) >>> hExtract)
-   n <- runEpubA (readAll a >>> scExtract)
-   runEpubA (constA (createSection (h++n)) >>> removeDocWhiteSpace >>> canonicalizeAllNodes >>> writeSection)
-   runEpubA fnOutput
+   n <- runEpubA (readChapter a >>> scExtract)
+   runEpubA (constA (createDoc (h++n)) >>> removeDocWhiteSpace >>> canonicalizeAllNodes >>> writeSection)
+   --runEpubA fnOutput
+   ns <- runEpubA fnOutput'
+   runEpubA (constA (createDoc ns) >>> writeDocument outputOpts "Notes.xhtml")
+   ps <- runEpubA pgOutput
+   runEpubA (root [] [selem "pagelist" (map constA ps)] >>> writeDocument outputOpts "Pages.xml")
    return ()
 
 --processSection :: [FilePath] -> Epub ()
 --processSection fs = do
---   n <- runEpubA (readAll fs >>> scExtract)
---   runEpubA (constA (createSection n) >>> removeDocWhiteSpace >>> canonicalizeAllNodes >>> writeSection )
+--   n <- runEpubA (readChapter fs >>> scExtract)
+--   runEpubA (constA (createDoc n) >>> removeDocWhiteSpace >>> canonicalizeAllNodes >>> writeSection )
 --   runEpubA fnOutput
 --   return () 
 
-readAll :: [String] -> EpubArrow b XmlTree
-readAll fls= constL fls >>> arr toUri >>> readFromDocument inputOpts >>> proc x -> do
+readChapter :: [String] -> EpubArrow b XmlTree
+readChapter fls= constL fls >>> arr toUri >>> readFromDocument inputOpts >>> proc x -> do
    v <- getAttrValue a_source -< x
    arrIO(\s -> putStrLn $ "Read file " ++ s) -< v
    returnA -< x
@@ -128,17 +133,19 @@ writeSection =
    where wrt e = writeDocument outputOpts (secFile ((seccnt e)-1))
          inc e = e {seccnt = 1 + (seccnt e)}
 
-createSection :: [XmlTree] -> XmlTree
-createSection cs = XN.mkRoot [] [
-   XN.mkElement (mkName "html") [XN.mkAttr (mkName "xmlns:epub") [XN.mkText "http://www.idpf.org/2007/ops"]] [
-      XN.mkElement (mkName "body") [] cs ]]
+createDoc :: [XmlTree] -> XmlTree
+--createDoc cs = XN.mkRoot [] [
+--   XN.mkElement (mkName "html") [XN.mkAttr (mkName "xmlns:epub") [XN.mkText "http://www.idpf.org/2007/ops"]] [
+--      XN.mkElement (mkName "body") [] cs ]]
+createDoc cs = head $ runLA doc ()
+   where doc = root [] [mkelem "html" [sattr "xmlns:epub" "http://www.idpf.org/2007/ops"] [selem "body" (map constA cs) ]]
 
 hExtract :: EpubArrow XmlTree XmlTree
 hExtract = deep (scTitle) >>> arr(\txt -> XN.mkElement (mkName "h1") [] [XN.mkText txt])
-   where scTitle = hasName "span" >>> hasAttrValue "class" ((==) "a2textg") >>> getChildren >>> isText >>> getText
+   where scTitle = hasName "span" >>> hasAttrValue "class" ((==) "a2textg") >>> countToc >>> getChildren >>> isText >>> getText
 
 scExtract :: EpubArrow XmlTree XmlTree
-scExtract = deep (isContent `guards` prCollect) >>> getChildren
+scExtract = deep (isContent `guards` prCollect) >>> countToc >>> getChildren
    where isContent = hasName "td" /> hasName "h1" 
 
 prCollect :: EpubArrow XmlTree XmlTree
@@ -153,6 +160,12 @@ prCollect = processChildren (porh1 >>> pcfn >>> pgCollect >>> fncmpl >>> chgh2)
          chgh2  = setElemName (mkName "h2") `when` hasName "h1"
 
          isFnPar= hasName "p" /> hasName "a" >>> hasAttrValue "class" ((==) "a2text") 
+
+countToc :: EpubArrow XmlTree XmlTree
+countToc = proc x -> do
+   e <- getUserState -< x
+   setUserState -< e { toccnt = 1 + (toccnt e) }
+   returnA -< x
 
 pgCollect :: EpubArrow XmlTree XmlTree
 pgCollect = processChildren( pgc `when`(hasName "a" >>> hasAttrValue "class" ((==) "a8text")) )
@@ -172,6 +185,29 @@ pgParse str = case (parse pgSpec "" str) of
 pgStore :: EpubArrow String String
 pgStore = getUserState &&& this >>> arr(\(e,p)-> (pgIns e p,p)) >>> first setUserState >>> arr snd
    where pgIns e p = e { pagebreaks = (Pagebreak (pgId p) p (seccnt e)):(pagebreaks e) }
+
+pgOutput :: EpubArrow b XmlTree
+pgOutput = proc x -> do
+   e <- getUserState -< x
+   let st= 1 + (toccnt e)
+   ns <- arr (uncurry pgXml) <<< unlistA -< (zip (reverse $ pagebreaks e) [st..])
+   returnA -< ns
+
+-- <pagelist>
+--  <pagetarget id="p275" type="normal" value="275" playorder="558">
+--    <navlabel>
+--      <text>
+--        275
+--      </text>
+--    </navlabel>
+--    <content src="Section-0001.xhtml#pg275"></content>
+--  </pagetarget>
+pgXml :: Pagebreak -> Int ->  XmlTree
+pgXml (Pagebreak i n s) c = head $ runLA pnode ()
+   where pnode = mkelem "pagetarget" [sattr "id" i, sattr "type" "normal", sattr "value" n, sattr "playorder" plord] [lbl, cntnt]
+         lbl   = selem "navlabel" [selem "text" [txt n]]
+         cntnt = aelem "content" [sattr "src" ((secFile s) ++ "#" ++ i)]
+         plord = show c
 
 fnCollect :: EpubArrow XmlTree XmlTree
 fnCollect = getAttrValue "href" &&& arr id >>> 
@@ -205,28 +241,50 @@ fnComplete = deep $ getChildren >>> choiceA [isAref :-> fa, isSpan :-> fspan]
          setUserState -< e { footnotes = (ftn {ftcontent = c}):(tail $ footnotes e) }
          none -< x
 
-fnXml :: [XmlTree] -> [Footnote] -> [XmlTree]
-fnXml tr [] = tr
-fnXml tr (Footnote i s x _ : fs) = fnXml ( pnode : tr ) fs
-   where pnode  = elm "p" [atr "epub:type" "footnote", atr "id" (noteId i)] ([elm "a" [atr "href" ref] [isup (show i)]] ++ x)
-         elm n  = XN.mkElement (mkName n)
-         atr n v= XN.mkAttr (mkName n) [XN.mkText v]
-         ref    = (secFile s) ++ "#" ++ (rnoteId i)
-         isup  t= elm "i" [] [elm "sup" [] [XN.mkText t]]
+--fnXml :: [XmlTree] -> [Footnote] -> [XmlTree]
+--fnXml tr [] = tr
+--fnXml tr (Footnote i s x _ : fs) = fnXml ( pnode : tr ) fs
+--   where pnode  = elm "p" [atr "epub:type" "footnote", atr "id" (noteId i)] ([elm "a" [atr "href" ref] isup] ++ x)
+--         elm n  = XN.mkElement (mkName n)
+--         atr n v= XN.mkAttr (mkName n) [XN.mkText v]
+--         ref    = (secFile s) ++ "#" ++ (rnoteId i)
+--         isup   = [ elm "i" [] [elm "sup" [] [XN.mkText (show i)]] ]
+--         --isup   = xread $ "<i><sup>" ++ (show i) ++ "</sup></i>"
 
---fnXmlA :: (ArrowXml a) => [Footnote] -> a n XmlTree
---fnXmlA (Footnote i s x _ : fs) = pnode <+> fnXmlA fs 
+fnXml' :: Footnote -> XmlTree
+fnXml' (Footnote i s x _)= head $ runLA pnode ()
+   where pnode = mkelem "p" [sattr "epub:type" "footnote", sattr "id" (noteId $ i)] (ahref : map constA x)
+         ahref = mkelem "a" [sattr "href" ((secFile s) ++ "#" ++ (rnoteId i))] [ isup ]
+         isup  = selem "i" [selem "sup" [txt (show i)]]
+
+--fnOutput :: EpubArrow b ()
+--fnOutput = proc x -> do
+--   e <- getUserState -< x
+--   ns <- arr (fnXml []) -< (footnotes e)
+--   writeDocument outputOpts "Notes.xhtml" -< createDoc ns
+--   returnA -< ()
+
+--fnXmlA :: (ArrowXml a) => Footnote -> a n XmlTree
+--fnXmlA (Footnote i s x _) = pnode 
 --   where pnode = mkelem "p" [attr "epub:type" (txt "footnote"), attr "id" (txt . noteId $ i)] (ahref : map constA x)
 --         ahref = mkelem "a" [attr "href" (txt $ (secFile s) ++ "#" ++ (rnoteId i))] [ isup ]
 --         isup  = selem "i" [selem "sup" [txt (show i)]]
---fnXmlA []      = this
+--
+--fnXmlA' :: (ArrowXml a) => [Footnote] -> a n XmlTree
+--fnXmlA' (Footnote i s x _:fs) = (fnXmlA' fs) <+> pnode
+--   where pnode = mkelem "p" [attr "epub:type" (txt "footnote"), attr "id" (txt . noteId $ i)] (ahref : map constA x)
+--         ahref = mkelem "a" [attr "href" (txt $ (secFile s) ++ "#" ++ (rnoteId i))] [ isup ]
+--         isup  = selem "i" [selem "sup" [txt (show i)]]
+--fnXmlA' []      = none
 
-fnOutput :: EpubArrow b ()
-fnOutput = proc x -> do
+
+fnOutput' :: EpubArrow b XmlTree
+fnOutput' = proc x -> do
    e <- getUserState -< x
-   ns <- arr (fnXml []) -< (footnotes e)
-   writeDocument outputOpts "Notes.xhtml" -< createSection ns
-   returnA -< ()
+   --ns <- app <<< arr (\f -> (catA $ map fnXmlA f,())) -< (footnotes e)
+   --ns <- app <<< arr (\f -> (fnXmlA' f,())) -< (footnotes e)
+   ns <- arr fnXml' <<< arrL reverse -< (footnotes e)
+   returnA -< ns
 
 outputFootnotes :: EpubArrow b ()
 outputFootnotes = proc x -> do
