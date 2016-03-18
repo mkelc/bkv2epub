@@ -1,0 +1,21 @@
+p {
+   text-align: justify;
+}
+
+.titleauthor {
+   text-align: center;
+   margin-top: 5%;
+}
+
+.title {
+   text-align: center;
+}
+
+.subtitle {
+   text-align: center;
+}
+
+.titledetail {
+   text-align: center;
+   margin-top: 50%;
+}

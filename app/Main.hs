@@ -1,7 +1,6 @@
 {-#LANGUAGE Arrows, PackageImports, NoMonomorphismRestriction, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, RelaxedPolyRec #-}
+{-#LANGUAGE OverloadedStrings, ExtendedDefaultRules#-}
 module Main where
---TODO erste Datei via Top-Arrow einlesen, die Folgenden dateien mit RunX in einer IO Monade lesen und diese via ArrIO
---     innerhalb der Arrow-Kette ausfuehren!
 --TODO im Nachgang Tidy aufrufen?
 import Control.Arrow.ArrowIO
 import Control.Monad hiding (when)
@@ -15,11 +14,16 @@ import qualified Text.XML.HXT.DOM.XmlNode as XN
 import Text.ParserCombinators.Parsec
 import Data.Tree.NTree.TypeDefs
 import Data.AssocList
+import Data.List
 import Text.Printf
 import System.Environment
 import System.FilePath
 import System.Directory
 import Lib
+import Shelly hiding (when,FilePath,(</>),put,get)
+import qualified Data.Text as T
+
+default(Int,Double,T.Text)
 
 data Footnote = Footnote {
    ftid      :: Int,
@@ -41,20 +45,19 @@ data EpubMeta = EpubMeta {
    marks       :: [(String,Int)],
    footnotes   :: [Footnote],
    pagebreaks  :: [Pagebreak],
+   outputfiles :: [FilePath],
    sourcefiles :: SourceFiles
 } deriving (Show)
 
 data SourceFiles = SourceFiles {
    sourcePath :: FilePath,
    targetPath :: FilePath,
+   tidyPath   :: FilePath,
    filenames  :: [String]
 } deriving (Show,Read)
 
 type EpubArrow b c = IOStateArrow EpubMeta b c
 type Epub = StateT EpubMeta IO
-
-bkvSource :: FilePath
-bkvSource = "D:/private/projects/cassian/"
 
 inputOpts :: SysConfigList
 inputOpts = [withValidate no, withParseHTML yes]
@@ -70,20 +73,32 @@ bkv []    = putStrLn "Usage: bkv.exe <epub-source-definition-file>.def"
 bkv (s:_) = readFile s >>= readIO >>= (return . epubInit) >>= runStateT createEpub >> return ()
 
 epubInit :: SourceFiles -> EpubMeta
-epubInit = EpubMeta 1 1 0 [] [] [] 
+epubInit = EpubMeta 1 1 0 [] [] [] [] 
 
 createEpub :: Epub ()
-createEpub = sections >>= mapM_ processSection' >> return ()
+createEpub = checkTargetDir >> sections >>= mapM_ processSection >> processFeatures >> tidy
 
+tidy :: Epub ()
+tidy = do
+   e <- get
+   let o= filter (isSuffixOf ".xhtml").outputfiles $ e
+       t= T.pack $ tidyPath $ sourcefiles e
+   forM_ o (\fp -> do
+      liftIO $ putStrLn $ "Tidy : " ++ fp
+      shelly $ errExit False $ run "tidy" [ "-m", "-config", t, T.pack fp ])
+   
 sections :: Epub [[FilePath]]
 sections = do
    sf <- fmap sourcefiles $ get
    let sp= sourcePath sf
        fl= map (\fn -> (fn, sp ++ fn)) $ filenames sf
-   forM fl (\(fn,fp) -> filesFor' fp >>= return . ((:) fp) )
+   forM fl (\(fn,fp) -> filesFor fp >>= return . ((:) fp) )
 
-filesFor' :: FilePath -> Epub [FilePath]
-filesFor' fp= lift $ loop [] (takeBaseName fp) (takeDirectory fp) [1..] 
+checkTargetDir :: Epub ()
+checkTargetDir = fmap (targetPath.sourcefiles) get >>= liftIO.(createDirectoryIfMissing True)
+
+filesFor :: FilePath -> Epub [FilePath]
+filesFor fp= lift $ loop [] (takeBaseName fp) (takeDirectory fp) [1..] 
    where loop fps b d (n:ns)= do
             let c= d </> (b ++ "-" ++ (show n) ++ ".html")
             x <- doesFileExist c
@@ -99,25 +114,21 @@ runEpubA f = do
    put $ xioUserState x
    return res
 
-processSection' :: [FilePath] -> Epub ()
-processSection' a@(f:_)= do
+processSection :: [FilePath] -> Epub ()
+processSection a@(f:_)= do
    h <- runEpubA (readDocument inputOpts (toUri f) >>> hExtract)
    n <- runEpubA (readChapter a >>> scExtract)
    runEpubA (constA (createDoc (h++n)) >>> removeDocWhiteSpace >>> canonicalizeAllNodes >>> writeSection)
-   --runEpubA fnOutput
-   ns <- runEpubA fnOutput'
-   runEpubA (constA (createDoc ns) >>> writeDocument outputOpts "Notes.xhtml")
-   ps <- runEpubA pgOutput
-   runEpubA (root [] [selem "pagelist" (map constA ps)] >>> writeDocument outputOpts "Pages.xml")
    return ()
 
---processSection :: [FilePath] -> Epub ()
---processSection fs = do
---   n <- runEpubA (readChapter fs >>> scExtract)
---   runEpubA (constA (createDoc n) >>> removeDocWhiteSpace >>> canonicalizeAllNodes >>> writeSection )
---   runEpubA fnOutput
---   return () 
-
+processFeatures :: Epub ()
+processFeatures = do
+   ns <- runEpubA fnOutput'
+   runEpubA ((constA $ createDoc ns) &&& (constA "Notes.xhtml") >>> writeDoc)
+   ps <- runEpubA pgOutput
+   runEpubA ((root [] [selem "pagelist" (map constA ps)]) &&& (constA "Pages.xml") >>> writeDoc )
+   return ()
+   
 readChapter :: [String] -> EpubArrow b XmlTree
 readChapter fls= constL fls >>> arr toUri >>> readFromDocument inputOpts >>> proc x -> do
    v <- getAttrValue a_source -< x
@@ -127,16 +138,24 @@ readChapter fls= constL fls >>> arr toUri >>> readFromDocument inputOpts >>> pro
 toUri :: FilePath -> String
 toUri = (++) "file://"
 
+writeDoc :: EpubArrow (XmlTree,String) XmlTree
+writeDoc = proc (x,n) -> do
+   e <- getUserState -< ()
+   let tp= (targetPath.sourcefiles $ e ) </> n
+   setUserState -< e { outputfiles = tp : (outputfiles e) } 
+   arrIO(\s -> putStrLn $ "Write " ++ s) -< tp
+   y <- app <<< first (arr $ writeDocument outputOpts) -< (tp,x)
+   returnA -< y
+
 writeSection :: EpubArrow XmlTree XmlTree
 writeSection = 
-   getUserState &&& this >>> first (arr  inc >>> setUserState >>> arr wrt) >>> app
-   where wrt e = writeDocument outputOpts (secFile ((seccnt e)-1))
+   this &&& getUserState >>> second (arr  inc >>> setUserState >>> arr fp) >>> writeDoc
+   --getUserState &&& this >>> first (arr  inc >>> setUserState >>> arr wrt) >>> app
+   where --wrt e = writeDocument outputOpts (secFile ((seccnt e)-1))
+         fp  e = secFile ((seccnt e)-1)
          inc e = e {seccnt = 1 + (seccnt e)}
 
 createDoc :: [XmlTree] -> XmlTree
---createDoc cs = XN.mkRoot [] [
---   XN.mkElement (mkName "html") [XN.mkAttr (mkName "xmlns:epub") [XN.mkText "http://www.idpf.org/2007/ops"]] [
---      XN.mkElement (mkName "body") [] cs ]]
 createDoc cs = head $ runLA doc ()
    where doc = root [] [mkelem "html" [sattr "xmlns:epub" "http://www.idpf.org/2007/ops"] [selem "body" (map constA cs) ]]
 
