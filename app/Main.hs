@@ -1,7 +1,6 @@
 {-#LANGUAGE Arrows, PackageImports, NoMonomorphismRestriction, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, RelaxedPolyRec #-}
 {-#LANGUAGE OverloadedStrings, ExtendedDefaultRules#-}
 module Main where
---TODO im Nachgang Tidy aufrufen?
 import Control.Arrow.ArrowIO
 import Control.Monad hiding (when)
 import Control.Monad.State hiding (when)
@@ -78,6 +77,16 @@ epubInit = EpubMeta 1 1 0 [] [] [] []
 createEpub :: Epub ()
 createEpub = checkTargetDir >> sections >>= mapM_ processSection >> processFeatures >> tidy
 
+checkTargetDir :: Epub ()
+checkTargetDir = fmap (targetPath.sourcefiles) get >>= liftIO.(createDirectoryIfMissing True)
+
+sections :: Epub [[FilePath]]
+sections = do
+   sf <- fmap sourcefiles $ get
+   let sp= sourcePath sf
+       fl= map (\fn -> (fn, sp ++ fn)) $ filenames sf
+   forM fl (\(fn,fp) -> filesFor fp >>= return . ((:) fp) )
+
 tidy :: Epub ()
 tidy = do
    e <- get
@@ -87,15 +96,6 @@ tidy = do
       liftIO $ putStrLn $ "Tidy : " ++ fp
       shelly $ errExit False $ run "tidy" [ "-m", "-config", t, T.pack fp ])
    
-sections :: Epub [[FilePath]]
-sections = do
-   sf <- fmap sourcefiles $ get
-   let sp= sourcePath sf
-       fl= map (\fn -> (fn, sp ++ fn)) $ filenames sf
-   forM fl (\(fn,fp) -> filesFor fp >>= return . ((:) fp) )
-
-checkTargetDir :: Epub ()
-checkTargetDir = fmap (targetPath.sourcefiles) get >>= liftIO.(createDirectoryIfMissing True)
 
 filesFor :: FilePath -> Epub [FilePath]
 filesFor fp= lift $ loop [] (takeBaseName fp) (takeDirectory fp) [1..] 
