@@ -37,6 +37,18 @@ replacement = many (part <|> mgroup <|> dollar)
 --       String has to be splitted in <pre-match><replacement or excision>|<tail> and then recursed.
 --       HINT: use MatchResult, Polymorphic return using match (or better: matchM to use MonadError)
 
+replaceAll' :: (IsString a, Monoid a, Extract a, RegexLike r a, Stream s Identity Char) => a -> r -> s -> a
+replaceAll' a r s = loop mempty a r (parseReplacement s)
+   where loop :: (IsString a, Monoid a, Extract a, RegexLike r a) => a -> a -> r -> [Replacement a] -> a
+         loop h t r rs = case (matchOnce r t) of
+                        Just (m) -> if (matchLen m) == 0
+                                       then  mappend h t
+                                       else  let offs = matchOffs m
+                                                 tot  = offs + (matchLen m)
+                                                 rpl  = mconcat $ map (\f -> f t m) rs
+                                             in loop  (mconcat [h, before offs t, rpl]) (after tot t) r rs
+                        Nothing  -> mappend h t
+
 replaceAll :: (IsString a, Monoid a, Extract a, RegexLike r a, Stream s Identity Char) => a -> r -> s -> a
 replaceAll a r s = case (matchOnce r a) of
                   Just (m) -> replaceAll (doreplace a [m] s) r s
@@ -87,6 +99,11 @@ doexcise s ms = mconcat $ reverse $ tailExtract s $ incrListExtract s $ nonMatch
          --len  m = snd (m ! 0)
          --extr (is,l) = (map (flip extract $ s) is, l)
          --finl (ex,l) = (after l s):ex
+
+parseReplacement :: (IsString a, Extract a, Stream s Identity Char) => s -> [Replacement a]
+parseReplacement s = case (runParser replacement () "Replacement String" s) of
+                        Right rs ->  rs
+                        Left err -> fail $ "Error in replacement string: " ++ (show err)
 
 -- | Extracts the non matching tail of the matching source @s@.
 --   This is a helper function applicable to the output of @incrListExtract@.
