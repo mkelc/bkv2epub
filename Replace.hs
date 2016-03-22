@@ -5,6 +5,7 @@ import Text.Regex.Base
 import Data.Array
 import Control.Monad
 import Control.Monad.Identity
+import Control.Arrow (first)
 import Text.Parsec
 import Data.String
 
@@ -37,6 +38,13 @@ replacement = many (part <|> mgroup <|> dollar)
 --       String has to be splitted in <pre-match><replacement or excision>|<tail> and then recursed.
 --       HINT: use MatchResult, Polymorphic return using match (or better: matchM to use MonadError)
 
+replaceAll'' :: (Eq a, IsString a, Monoid a, Extract a, RegexLike r a, Stream s Identity Char) => a -> r -> s -> a
+replaceAll'' a r s = loop_ (mappend mempty,a)
+   where rs = parseReplacement s
+         loop_ (h,t) = if t == mempty
+                       then h mempty
+                       else loop_ $ first ((.) h ) $ replaceStep' t r rs
+
 replaceAll' :: (IsString a, Monoid a, Extract a, RegexLike r a, Stream s Identity Char) => a -> r -> s -> a
 replaceAll' a r s = loop mempty a r (parseReplacement s)
    where loop :: (IsString a, Monoid a, Extract a, RegexLike r a) => a -> a -> r -> [Replacement a] -> a
@@ -48,6 +56,32 @@ replaceAll' a r s = loop mempty a r (parseReplacement s)
                                                  rpl  = mconcat $ map (\f -> f t m) rs
                                              in loop  (mconcat [h, before offs t, rpl]) (after tot t) r rs
                         Nothing  -> mappend h t
+
+replaceFirst' :: (IsString a, Monoid a, Extract a, RegexLike r a, Stream s Identity Char) => a -> r -> s -> a
+replaceFirst' a r s = uncurry mappend $ replaceStep a r (parseReplacement s)
+
+replaceStep' :: (IsString a, Monoid a, Extract a, RegexLike r a) => a -> r -> [Replacement a] -> (a -> a,a)
+replaceStep' a r rs = case (matchOnce r a) of
+                     Just(m) -> if (matchLen m) == 0
+                                    then (mappend a, mempty)
+                                    else let offs = matchOffs m
+                                             tot  = offs + (matchLen m)
+                                             rpl  = bFuncLstApp rs a m 
+                                         in (mappend (before offs a) . mappend rpl, after tot a)
+                     Nothing -> (mappend a, mempty)
+
+replaceStep :: (IsString a, Monoid a, Extract a, RegexLike r a) => a -> r -> [Replacement a] -> (a,a)
+replaceStep a r rs = case (matchOnce r a) of
+                     Just(m) -> if (matchLen m) == 0
+                                    then (a, mempty)
+                                    else let offs = matchOffs m
+                                             tot  = offs + (matchLen m)
+                                             rpl  = bFuncLstApp rs a m 
+                                         in (mappend (before offs a) rpl, after tot a)
+                     Nothing -> (a, mempty)
+
+bFuncLstApp :: (Monoid c) => [a->b->c] -> a -> b -> c
+bFuncLstApp fs a b = mconcat $ map (\f -> f a b) fs
 
 replaceAll :: (IsString a, Monoid a, Extract a, RegexLike r a, Stream s Identity Char) => a -> r -> s -> a
 replaceAll a r s = case (matchOnce r a) of
