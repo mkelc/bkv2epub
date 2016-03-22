@@ -5,7 +5,7 @@ import Text.Regex.Base
 import Data.Array
 import Control.Monad
 import Control.Monad.Identity
-import Control.Arrow (first)
+import Control.Arrow (first,app)
 import Text.Parsec
 import Data.String
 
@@ -58,7 +58,7 @@ replaceAll' a r s = loop mempty a r (parseReplacement s)
                         Nothing  -> mappend h t
 
 replaceFirst' :: (IsString a, Monoid a, Extract a, RegexLike r a, Stream s Identity Char) => a -> r -> s -> a
-replaceFirst' a r s = uncurry mappend $ replaceStep a r (parseReplacement s)
+replaceFirst' a r s = app $ replaceStep' a r (parseReplacement s)
 
 replaceStep' :: (IsString a, Monoid a, Extract a, RegexLike r a) => a -> r -> [Replacement a] -> (a -> a,a)
 replaceStep' a r rs = case (matchOnce r a) of
