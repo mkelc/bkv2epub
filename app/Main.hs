@@ -51,10 +51,11 @@ data EpubMeta = EpubMeta {
 } deriving (Show)
 
 data SourceFiles = SourceFiles {
-   sourcePath :: FilePath,
-   targetPath :: FilePath,
-   tidyPath   :: FilePath,
-   filenames  :: [String]
+   headerClass :: String,
+   sourcePath  :: FilePath,
+   targetPath  :: FilePath,
+   tidyPath    :: FilePath,
+   filenames   :: [String]
 } deriving (Show,Read)
 
 type EpubArrow b c = IOStateArrow EpubMeta b c
@@ -163,7 +164,18 @@ createDoc cs = head $ runLA doc ()
 
 hExtract :: EpubArrow XmlTree XmlTree
 hExtract = deep (scTitle) >>> arr(\txt -> XN.mkElement (mkName "h1") [] [XN.mkText txt])
-   where scTitle = hasName "span" >>> hasAttrValue "class" ((==) "a2textg") >>> countToc >>> getChildren >>> isText >>> getText
+   where scTitle = hasName "span" >>> isHeader >>> countToc >>> getChildren >>> isText >>> getText
+-- where scTitle = hasName "span" >>> hasAttrValue "class" ((==) "a2textg") >>> countToc >>> getChildren >>> isText >>> getText
+
+-- | isHeader - search for the node defining the chapter heading 
+-- using a special, user defined css class
+-- same as:
+-- > this &&& getUserState >>> (second.arr $ (==).headerClass.sourcefiles) >>> (first.arr $ hasAttrValue "class") >>> app 
+isHeader :: EpubArrow XmlTree XmlTree
+isHeader = getUserState &&& this >>> (first.arr $ (hasAttrValue "class").(==).headerClass.sourcefiles) >>> app
+--isHeader = proc x -> do
+--   e <- getUserState -< x
+--   app <<< arr ( \(s,n) -> (hasAttrValue "class" ((==) s),n) ) -< (headerClass.sourcefiles $ e, x)
 
 scExtract :: EpubArrow XmlTree XmlTree
 scExtract = deep (isContent `guards` prCollect) >>> countToc >>> getChildren

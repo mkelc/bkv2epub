@@ -1,4 +1,5 @@
 SourceFiles { 
+   headerClass = "a2textg",
    sourcePath = "D:/private/projects/cassian/", 
    targetPath = "D:/private/projects/cassian/epub2/",
    tidyPath   = "D:/private/projects/cassian/tidy.cfg",

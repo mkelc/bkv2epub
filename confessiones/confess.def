@@ -1,0 +1,20 @@
+SourceFiles { 
+   headerClass = "a3textg",
+   sourcePath = "D:/private/projects/confessiones/", 
+   targetPath = "D:/private/projects/confessiones/epub2/",
+   tidyPath   = "D:/private/projects/confessiones/tidy.cfg",
+   filenames = [
+    "kapitel63.html",
+    "kapitel64.html",
+    "kapitel65.html",
+    "kapitel66.html",
+    "kapitel67.html",
+    "kapitel68.html",
+    "kapitel69.html",
+    "kapitel70.html",
+    "kapitel71.html",
+    "kapitel72.html",
+    "kapitel73.html",
+    "kapitel74.html",
+    "kapitel75.html" ]
+}
