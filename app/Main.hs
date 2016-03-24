@@ -11,6 +11,8 @@ import Text.XML.HXT.DOM.QualifiedName
 import Text.XML.HXT.DOM.XmlKeywords (a_source) --for Attribute a_source  - sourcefile read from
 import qualified Text.XML.HXT.DOM.XmlNode as XN
 import Text.ParserCombinators.Parsec
+import Text.Regex.Replace
+import Text.Regex.TDFA
 import Data.Tree.NTree.TypeDefs
 import Data.AssocList
 import Data.List
@@ -168,7 +170,7 @@ scExtract = deep (isContent `guards` prCollect) >>> countToc >>> getChildren
    where isContent = hasName "td" /> hasName "h1" 
 
 prCollect :: EpubArrow XmlTree XmlTree
-prCollect = processChildren (porh1 >>> pcfn >>> pgCollect >>> fncmpl >>> chgh2)
+prCollect = processChildren (porh1 >>> removeRub1 >>> pcfn >>> pgCollect >>> fncmpl >>> chgh2)
 
    where porh1  = filterA (hasName "p" <+> hasName "h1")
          
@@ -179,6 +181,15 @@ prCollect = processChildren (porh1 >>> pcfn >>> pgCollect >>> fncmpl >>> chgh2)
          chgh2  = setElemName (mkName "h2") `when` hasName "h1"
 
          isFnPar= hasName "p" /> hasName "a" >>> hasAttrValue "class" ((==) "a2text") 
+
+removeRub1 :: EpubArrow XmlTree XmlTree
+removeRub1 = processTopDown $ (changeText $ removeTxtRubbish (mkRe "</")) `when` isText 
+
+removeTxtRubbish :: Regex -> String -> String
+removeTxtRubbish r s = excise s r
+
+mkRe :: String -> Regex
+mkRe = makeRegex
 
 countToc :: EpubArrow XmlTree XmlTree
 countToc = proc x -> do

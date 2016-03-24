@@ -33,6 +33,8 @@ executable bkv-exe
                      , filepath
                      , shelly >= 1.6.5
                      , text
+                     , regex-tdfa
+                     , regex-replace
   default-language:    Haskell2010
 
 test-suite bkv-test
