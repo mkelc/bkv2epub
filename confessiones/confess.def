@@ -2,7 +2,7 @@ SourceFiles {
    headerClass = "a3textg",
    sourcePath = "D:/private/projects/confessiones/", 
    targetPath = "D:/private/projects/confessiones/epub2/",
-   tidyPath   = "D:/private/projects/confessiones/tidy.cfg",
+   tidyPath   = "D:/private/projects/cassian/tidy.cfg",
    filenames = [
     "kapitel63.html",
     "kapitel64.html",
