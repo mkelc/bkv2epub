@@ -126,7 +126,7 @@ processSection a@(f:_)= do
 
 processFeatures :: Epub ()
 processFeatures = do
-   ns <- runEpubA fnOutput'
+   ns <- runEpubA fnOutput
    runEpubA ((constA $ createDoc ns) &&& (constA "Notes.xhtml") >>> writeDoc)
    ps <- runEpubA pgOutput
    runEpubA ((root [] [selem "pagelist" (map constA ps)]) &&& (constA "Pages.xml") >>> writeDoc )
@@ -153,9 +153,7 @@ writeDoc = proc (x,n) -> do
 writeSection :: EpubArrow XmlTree XmlTree
 writeSection = 
    this &&& getUserState >>> second (arr  inc >>> setUserState >>> arr fp) >>> writeDoc
-   --getUserState &&& this >>> first (arr  inc >>> setUserState >>> arr wrt) >>> app
-   where --wrt e = writeDocument outputOpts (secFile ((seccnt e)-1))
-         fp  e = secFile ((seccnt e)-1)
+   where fp  e = secFile ((seccnt e)-1)
          inc e = e {seccnt = 1 + (seccnt e)}
 
 createDoc :: [XmlTree] -> XmlTree
@@ -165,17 +163,11 @@ createDoc cs = head $ runLA doc ()
 hExtract :: EpubArrow XmlTree XmlTree
 hExtract = deep (scTitle) >>> arr(\txt -> XN.mkElement (mkName "h1") [] [XN.mkText txt])
    where scTitle = hasName "span" >>> isHeader >>> countToc >>> getChildren >>> isText >>> getText
--- where scTitle = hasName "span" >>> hasAttrValue "class" ((==) "a2textg") >>> countToc >>> getChildren >>> isText >>> getText
 
 -- | isHeader - search for the node defining the chapter heading 
 -- using a special, user defined css class
--- same as:
--- > this &&& getUserState >>> (second.arr $ (==).headerClass.sourcefiles) >>> (first.arr $ hasAttrValue "class") >>> app 
 isHeader :: EpubArrow XmlTree XmlTree
 isHeader = getUserState &&& this >>> (first.arr $ (hasAttrValue "class").(==).headerClass.sourcefiles) >>> app
---isHeader = proc x -> do
---   e <- getUserState -< x
---   app <<< arr ( \(s,n) -> (hasAttrValue "class" ((==) s),n) ) -< (headerClass.sourcefiles $ e, x)
 
 scExtract :: EpubArrow XmlTree XmlTree
 scExtract = deep (isContent `guards` prCollect) >>> countToc >>> getChildren
@@ -235,6 +227,7 @@ pgOutput = proc x -> do
    ns <- arr (uncurry pgXml) <<< unlistA -< (zip (reverse $ pagebreaks e) [st..])
    returnA -< ns
 
+-- | Generate Epub2 Pagelist to integrate page numbers
 -- <pagelist>
 --  <pagetarget id="p275" type="normal" value="275" playorder="558">
 --    <navlabel>
@@ -283,49 +276,16 @@ fnComplete = deep $ getChildren >>> choiceA [isAref :-> fa, isSpan :-> fspan]
          setUserState -< e { footnotes = (ftn {ftcontent = c}):(tail $ footnotes e) }
          none -< x
 
---fnXml :: [XmlTree] -> [Footnote] -> [XmlTree]
---fnXml tr [] = tr
---fnXml tr (Footnote i s x _ : fs) = fnXml ( pnode : tr ) fs
---   where pnode  = elm "p" [atr "epub:type" "footnote", atr "id" (noteId i)] ([elm "a" [atr "href" ref] isup] ++ x)
---         elm n  = XN.mkElement (mkName n)
---         atr n v= XN.mkAttr (mkName n) [XN.mkText v]
---         ref    = (secFile s) ++ "#" ++ (rnoteId i)
---         isup   = [ elm "i" [] [elm "sup" [] [XN.mkText (show i)]] ]
---         --isup   = xread $ "<i><sup>" ++ (show i) ++ "</sup></i>"
-
-fnXml' :: Footnote -> XmlTree
-fnXml' (Footnote i s x _)= head $ runLA pnode ()
+fnXml :: Footnote -> XmlTree
+fnXml (Footnote i s x _)= head $ runLA pnode ()
    where pnode = mkelem "p" [sattr "epub:type" "footnote", sattr "id" (noteId $ i)] (ahref : map constA x)
          ahref = mkelem "a" [sattr "href" ((secFile s) ++ "#" ++ (rnoteId i))] [ isup ]
          isup  = selem "i" [selem "sup" [txt (show i)]]
 
---fnOutput :: EpubArrow b ()
---fnOutput = proc x -> do
---   e <- getUserState -< x
---   ns <- arr (fnXml []) -< (footnotes e)
---   writeDocument outputOpts "Notes.xhtml" -< createDoc ns
---   returnA -< ()
-
---fnXmlA :: (ArrowXml a) => Footnote -> a n XmlTree
---fnXmlA (Footnote i s x _) = pnode 
---   where pnode = mkelem "p" [attr "epub:type" (txt "footnote"), attr "id" (txt . noteId $ i)] (ahref : map constA x)
---         ahref = mkelem "a" [attr "href" (txt $ (secFile s) ++ "#" ++ (rnoteId i))] [ isup ]
---         isup  = selem "i" [selem "sup" [txt (show i)]]
---
---fnXmlA' :: (ArrowXml a) => [Footnote] -> a n XmlTree
---fnXmlA' (Footnote i s x _:fs) = (fnXmlA' fs) <+> pnode
---   where pnode = mkelem "p" [attr "epub:type" (txt "footnote"), attr "id" (txt . noteId $ i)] (ahref : map constA x)
---         ahref = mkelem "a" [attr "href" (txt $ (secFile s) ++ "#" ++ (rnoteId i))] [ isup ]
---         isup  = selem "i" [selem "sup" [txt (show i)]]
---fnXmlA' []      = none
-
-
-fnOutput' :: EpubArrow b XmlTree
-fnOutput' = proc x -> do
+fnOutput :: EpubArrow b XmlTree
+fnOutput = proc x -> do
    e <- getUserState -< x
-   --ns <- app <<< arr (\f -> (catA $ map fnXmlA f,())) -< (footnotes e)
-   --ns <- app <<< arr (\f -> (fnXmlA' f,())) -< (footnotes e)
-   ns <- arr fnXml' <<< arrL reverse -< (footnotes e)
+   ns <- arr fnXml <<< arrL reverse -< (footnotes e)
    returnA -< ns
 
 outputFootnotes :: EpubArrow b ()
